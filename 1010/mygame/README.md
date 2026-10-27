@@ -22,11 +22,19 @@ Drag one of the 3 tiles on the right onto the board, or pick one (click it, or p
 1/2/3) and then click a square. Full rows and columns are cleared, each square
 placed scores 1 point, and the game ends when none of the tiles on offer fit.
 
+Each game you get 3 undos (the hearts under the score) and 3 new sets of tiles
+(D swaps the tiles on offer for another 3). An undo also takes back a new set.
+When a game you played ends, its score goes into the high scores (H), kept in
+`data/1010scores.txt`. Games the computer plays in auto mode don't count: the
+panel shows their runs and best score instead.
+
 | Key | Action |
 |---|---|
 | 1 / 2 / 3 | select a tile |
 | O (hold) | show the best spot for the selected tile |
-| U | undo the last move |
+| U | undo the last move (3 times per game, shown as hearts) |
+| D | swap the tiles on offer for a new set (3 times per game) |
+| H | show the high scores instead of the help, and back |
 | N | new game |
 | A | auto mode on/off: the computer keeps playing games and tracks runs and best score |
 | E | let the computer make one move |
@@ -41,6 +49,28 @@ placed scores 1 point, and the game ends when none of the tiles on offer fit.
 When the game closes, the time played (since it opened, over every game) and
 the score are printed to the console.
 
+### Logs and errors
+
+Everything worth knowing about a session goes to the console (open it with the `` ` `` key), the
+terminal and `data/1010.log` (with the date and time; it starts afresh each
+session):
+
+* the session's seed, so `--seed N` can repeat any session,
+* each game's score, new high scores, saves and loads,
+* warnings and errors, which also show below the board (orange and red).
+
+Problems are reported instead of being ignored or crashing the game:
+
+* a damaged save file says what is wrong (`row 4 is "0000090000", not 10 of
+  the digits 012345`) and the current game goes on,
+* a save or load that fails says so, and Q doesn't quit if the save failed,
+* bad lines in the scores file are left out and logged,
+* a bad `--seed` is reported, and a random seed used instead,
+* a playback that doesn't match the board stops with an error,
+* a strategy choosing a move that doesn't fit is reported as a bug, and auto
+  mode stops,
+* a crash logs the seeds, the mode and the board before DragonRuby shows it.
+
 ### Where things went
 
 | Original (Gosu) | DragonRuby |
@@ -49,6 +79,8 @@ the score are printed to the console.
 | `Board1010::TILES` (number matrices) | `app/tiles.rb`, `class Tile` (shapes drawn as text) |
 | `auto_player.rb`, `class AutoPlayer` | `app/auto_player.rb`, `class AutoPlayer` (same strategies) |
 | `move_animation.rb`, `class MoveAnimation` (milliseconds) | `app/move_animation.rb`, `class MoveAnimation` (ticks) |
+| (new) | `app/leaderboard.rb`, `class Leaderboard`: the high scores |
+| `puts` | `app/game_log.rb`, `module GameLog`: console, log file and levels |
 | `game_1010.rb`, `class GameWindow < Gosu::Window` | `app/main.rb`, `class Game` (with `attr_dr` for `state`, `inputs`, `outputs`) |
 | `Window#update` + `Window#draw` | `Game#tick`, called 60 times a second through the top-level `tick(args)` |
 | `button_down` / `button_up` callbacks | checking `inputs.mouse.key_down.left`, `key_up.left`, `inputs.keyboard.key_down.u`, ... each tick |
@@ -76,8 +108,9 @@ the score are printed to the console.
 * Messages show below the board, and recording shows a blinking square and
   "REC" instead of a triangle.
 * L loads the saved game while playing.
-* A save file with a score or squares that aren't numbers 0 to 5 is treated as
-  damaged instead of crashing the game.
+* 3 undos per game instead of one at a time, new sets of tiles (D), and high
+  scores (H).
+* A damaged save file is reported (see above) instead of crashing the game.
 * Not ported: the terminal version (`terminal_game.rb`).
 
 ### DragonRuby gotchas found while porting
@@ -92,6 +125,12 @@ the score are printed to the console.
   regular expressions. `max_by` can't compare arrays, and
   `each_with_index.to_h { ... }` returns nils instead of raising an error.
 * `Kernel.tick_count` can be negative while tests run.
+* `Time` has no `strftime`; build dates with `format` and `Time#year`, ... instead.
+* `GTK.log_warn` and `log_debug` don't reach `logs/puts.log` or `logs/all.log`,
+  and `log_info`/`log_error` add a prefix of their own, so `GameLog` uses `puts`.
+* A test can't stub `DR.write_file` and put it back: `DR` forwards to the runtime,
+  and removing the stub left the stub in place. The tests pass the game an
+  unwritable file name (`data/\0...`) instead.
 * A method definition without parentheses must not END with a required keyword
   argument. In `def board_squares cells, color, alpha:` DragonRuby read the next
   line as alpha's default value, so the method body silently did nothing.

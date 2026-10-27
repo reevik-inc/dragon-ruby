@@ -77,8 +77,7 @@ ALL_TILES = [
 ]
 
 # Look up a tile by name (used when loading a saved game).
-TILES_BY_NAME = {}
-ALL_TILES.each { |tile| TILES_BY_NAME[tile.name] = tile }
+TILES_BY_NAME = ALL_TILES.map { |tile| [tile.name, tile] }.to_h
 
 # When none of the 3 random tiles fit, the original swapped the first one for
 # the first of these small tiles that does fit (Board1010#find_fitting_tile).

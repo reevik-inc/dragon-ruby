@@ -13,25 +13,41 @@ class Board
   COLS    = 10
   OPTIONS = 3   # tiles offered at a time
   EMPTY   = 0
+  UNDOS   = 3   # undos allowed per game (the original allowed one at a time)
+  SKIPS   = 3   # times per game the tiles on offer can be swapped for a new set
+
+  # Every [row, col] on the board, top-left first, row by row.
+  ALL_POSITIONS = (0...ROWS).to_a.product((0...COLS).to_a)
+
+  # What a saved row may hold: an empty square or the value of some tile.
+  SAVED_CELL_CHARS = ([EMPTY] + ALL_TILES.map(&:value)).uniq.join
+  DIGITS           = "0123456789"
+
+  # Raised by Board.from_save, with the reason the text isn't a saved game.
+  class DamagedSave < StandardError; end
 
   # [row, col] steps to the 8 squares around a square.
   NEIGHBOUR_OFFSETS = [[-1, -1], [-1, 0], [-1, 1], [0, -1], [0, 1], [1, -1], [1, 0], [1, 1]]
 
-  attr_reader :cells, :options, :score, :random
+  attr_reader :cells, :options, :score, :random, :skips_left
+  attr_accessor :undos_left  # the game counts undos down (see Game#undo)
 
   # `random` deals the tiles. Pass Random.new(seed) to get the same tiles
   # every time (that is how a recorded game is played back).
-  def initialize cells: nil, options: [], score: 0, random: Random.new
-    @cells   = cells || Array.new(ROWS) { Array.new(COLS, EMPTY) }
-    @options = options  # the tiles waiting to be placed (Board1010#options)
-    @score   = score
-    @random  = random
+  def initialize cells: nil, options: [], score: 0, random: Random.new, undos_left: UNDOS, skips_left: SKIPS
+    @cells      = cells || Array.new(ROWS) { Array.new(COLS, EMPTY) }
+    @options    = options  # the tiles waiting to be placed (Board1010#options)
+    @score      = score
+    @random     = random
+    @undos_left = undos_left
+    @skips_left = skips_left
   end
 
   # A deep copy, used for undo. It shares the random number generator, so a
   # recorded game deals the same tiles when it is played back.
   def copy
-    Board.new cells: @cells.map(&:dup), options: @options.dup, score: @score, random: @random
+    Board.new cells: @cells.map(&:dup), options: @options.dup, score: @score, random: @random,
+              undos_left: @undos_left, skips_left: @skips_left
   end
 
   # -------------------------------------------------------------------------
@@ -77,7 +93,7 @@ class Board
   end
 
   def filled? row, col
-    inside?(row, col) && @cells[row][col] != EMPTY
+    inside?(row, col) && !empty?(row, col)
   end
 
   # The board squares a tile would cover with its anchor on (row, col).
@@ -104,8 +120,8 @@ class Board
   # Rows and columns that have no empty squares left.
   # (Board1010#cleanup with dry_run = true)
   def full_lines
-    rows = (0...ROWS).select { |r| @cells[r].all? { |value| value != EMPTY } }
-    cols = (0...COLS).select { |c| @cells.all? { |row| row[c] != EMPTY } }
+    rows = (0...ROWS).select { |r| (0...COLS).all? { |c| filled?(r, c) } }
+    cols = (0...COLS).select { |c| (0...ROWS).all? { |r| filled?(r, c) } }
     [rows, cols]
   end
 
@@ -126,6 +142,16 @@ class Board
     @options = generate_options if @options.empty?
   end
 
+  # Swaps the tiles on offer for a new set, SKIPS times per game. Returns
+  # false when there are no skips left.
+  def skip_options
+    return false unless @skips_left > 0
+
+    @skips_left -= 1
+    @options = generate_options
+    true
+  end
+
   # Board1010#generate_tiles: 3 random tiles. If none of them fit anywhere,
   # the first one is swapped for a small tile that does fit.
   #
@@ -144,12 +170,7 @@ class Board
 
   # The first [row, col] where the tile fits, or nil.
   def find_position tile
-    ROWS.times do |r|
-      COLS.times do |c|
-        return [r, c] if fits?(tile, r, c)
-      end
-    end
-    nil
+    ALL_POSITIONS.find { |r, c| fits?(tile, r, c) }
   end
 
   # Board1010#pos_exists? for a single tile. Stops at the first fit.
@@ -160,13 +181,7 @@ class Board
   # Every [row, col] where the tile fits, top-left first
   # (Board1010#find_starting_pos).
   def positions_for tile
-    positions = []
-    ROWS.times do |r|
-      COLS.times do |c|
-        positions << [r, c] if fits?(tile, r, c)
-      end
-    end
-    positions
+    ALL_POSITIONS.select { |r, c| fits?(tile, r, c) }
   end
 
   # -------------------------------------------------------------------------
@@ -203,38 +218,70 @@ class Board
   # This is a plain text format that is easy to read in an editor:
   #   score=133
   #   options=hl2,sq3,dot
+  #   undos=2
+  #   skips=3
   #   row=0000123000    (one line per row, top row first)
   def to_save
-    lines = ["score=#{@score}", "options=#{@options.map(&:name).join(',')}"]
+    lines = ["score=#{@score}", "options=#{@options.map(&:name).join(',')}",
+             "undos=#{@undos_left}", "skips=#{@skips_left}"]
     @cells.each { |row| lines << "row=#{row.join}" }
     lines.join("\n")
   end
 
-  # Builds a Board from text made by to_save, or returns nil if the text
-  # doesn't look like a saved game.
+  # Builds a Board from text made by to_save. Raises DamagedSave, saying what
+  # is wrong, if the text doesn't look like a saved game. Saves from before
+  # undos and skips were counted get the full allowance.
   #
   # NOTE: DragonRuby has no Integer(text, exception: false) and no regular
   # expressions, so the score and rows are checked one character at a time.
-  # A row may only hold the values tiles use (0 to 5), so a damaged file
-  # can't crash the drawing.
+  # A row may only hold the values tiles use, so a damaged file can't crash
+  # the drawing.
   def self.from_save text, random: Random.new
     score   = nil
     options = []
     rows    = []
+    undos   = UNDOS
+    skips   = SKIPS
 
-    text.split("\n").each do |line|
-      key, value = line.strip.split("=", 2)
+    text.split("\n").each_with_index do |line, i|
+      line = line.strip
+      next if line.empty?
+
+      key, value = line.split("=", 2)
       value = value.to_s
       case key
-      when "score"   then score = value.to_i if digits?(value, "0123456789")
-      when "options" then options = value.split(",").map { |name| TILES_BY_NAME[name.to_sym] }.compact
-      when "row"     then rows << (digits?(value, "012345") ? value.chars.map(&:to_i) : [])
+      when "score" then score = whole_number(value, "the score")
+      when "undos" then undos = whole_number(value, "undos", max: UNDOS)
+      when "skips" then skips = whole_number(value, "skips", max: SKIPS)
+      when "options"
+        options = value.split(",").map do |name|
+          TILES_BY_NAME[name.to_sym] || damaged!("there is no tile named #{name.inspect}")
+        end
+      when "row"
+        unless value.length == COLS && digits?(value, SAVED_CELL_CHARS)
+          damaged! "row #{rows.length + 1} is #{value.inspect}, not #{COLS} of the digits #{SAVED_CELL_CHARS}"
+        end
+        rows << value.chars.map(&:to_i)
+      else
+        damaged! "line #{i + 1} is not understood: #{line.inspect}"
       end
     end
 
-    return nil if score.nil? || rows.length != ROWS || rows.any? { |row| row.length != COLS }
+    damaged! "the score is missing"                                    if score.nil?
+    damaged! "it has #{rows.length} rows instead of #{ROWS}"           if rows.length != ROWS
+    damaged! "it offers #{options.length} tiles, more than #{OPTIONS}" if options.length > OPTIONS
 
-    Board.new cells: rows, options: options, score: score, random: random
+    Board.new cells: rows, options: options, score: score, random: random, undos_left: undos, skips_left: skips
+  end
+
+  def self.whole_number value, name, max: nil
+    damaged! "#{name} #{value.inspect} is not a whole number" unless digits?(value, DIGITS)
+    damaged! "#{name} #{value} is more than #{max}" if max && value.to_i > max
+    value.to_i
+  end
+
+  def self.damaged! reason
+    raise DamagedSave, reason
   end
 
   # Is `text` made only of the characters in `allowed` (and not empty)?

@@ -1,11 +1,13 @@
 # 1010!: a DragonRuby port of the Gosu game at https://github.com/shanko/1010
 #
-# The game is split into these files:
-#   app/tiles.rb           the 19 tile shapes                 (Board1010::TILES)
-#   app/board.rb           the rules, no drawing at all       (class Board1010)
-#   app/auto_player.rb     how the computer picks its moves   (class AutoPlayer)
-#   app/move_animation.rb  shows a move square by square      (class MoveAnimation)
-#   app/main.rb            input, auto play and drawing       (class GameWindow)
+# The game is split into these files (with what they replace in the Gosu version):
+#   app/tiles.rb           the 19 tile shapes                 (Board1010::ALL_TILES)
+#   app/board.rb           the rules, no drawing at all       (Board1010)
+#   app/auto_player.rb     how the computer picks its moves   (AutoPlayer)
+#   app/move_animation.rb  shows a move square by square      (MoveAnimation)
+#   app/leaderboard.rb     your best scores (H shows them)    (new)
+#   app/game_log.rb        reports what happens, and errors   (puts)
+#   app/main.rb            input, auto play and drawing       (GameWindow)
 #
 # Start options (all optional):
 #   ./dragonruby mygame --auto              the computer plays, game after game
@@ -20,10 +22,16 @@
 # DragonRuby's (0, 0) is the BOTTOM-left of the 1280x720 screen and y grows
 # upwards. The board keeps the original's numbering (row 0 at the top), so
 # `cell_xy` converts rows into y positions measured down from BOARD_TOP.
+#
+# What happens in a session (its seed, each game's score, saves, warnings and
+# errors) is printed to the console and written to data/1010.log; see
+# game_log.rb.
 
+require "app/game_log.rb"
 require "app/tiles.rb"
 require "app/board.rb"
 require "app/auto_player.rb"
+require "app/leaderboard.rb"
 require "app/move_animation.rb"
 
 # ---------------------------------------------------------------------------
@@ -50,23 +58,39 @@ OPTION_CELL_INNER   = 30
 OPTION_CORNER       = 3
 OPTION_NUMBER_INSET = 14         # where the 1/2/3 sits, from the top-left corner
 
-# The panel on the right: score, status and help.
+# The panel on the right: score, status, and the help or the high scores.
 PANEL_X        = 990
 PANEL_W        = 240
 PANEL_CENTER_X = PANEL_X + PANEL_W.idiv(2)
 PANEL_Y = {
-  title:       650,
-  score:       570,
-  time:        525,
-  status:      480,
-  status_hint: 448,
-  mode:        410,  # AUTO or PLAYBACK
-  mode_detail: 384,
-  help:        350
+  title:       660,
+  score:       595,
+  best:        558,
+  time:        528,
+  undos:       496,  # a heart per undo left
+  skips:       468,
+  status:      436,
+  status_hint: 408,
+  mode:        380,  # AUTO or PLAYBACK
+  mode_detail: 356,
+  help:        322   # or the high scores (H)
 }
-HELP_LINE_HEIGHT = 26
+HELP_LINE_HEIGHT = 23
 RECORDING_MARK_X = PANEL_X + 150  # next to the time
 RECORDING_MARK   = 16
+
+# The undo hearts. A Tile only for its shape: '#' is a filled pixel.
+HEART = Tile.new(:heart, 0, [".##.##.",
+                             "#######",
+                             "#######",
+                             ".#####.",
+                             "..###..",
+                             "...#..."])
+HEART_PIXEL = 3                                   # size of one '#'
+HEART_STEP  = (HEART.width + 2) * HEART_PIXEL     # from one heart to the next
+
+# The high scores (H) replace the help: rank, score (right-aligned) and date.
+SCORE_COLUMNS = { rank: PANEL_X, score: PANEL_X + 95, date: PANEL_X + 110 }
 
 # Messages like "Game saved" go below the board, where long ones fit.
 MESSAGE_X = BOARD_X
@@ -77,9 +101,9 @@ HELP_LINES = [
   "or pick one (click or 1/2/3)",
   "then click a square.",
   "Right click: drop selection",
-  "",
   "O (hold): best spot for tile",
-  "U: undo     N: new game",
+  "U: undo    D: new tiles",
+  "N: new game  H: high scores",
   "A: auto play  E: one move",
   "S: save     L: load",
   "R: record   P: play it back",
@@ -98,13 +122,15 @@ KEY_ACTIONS = {
   l:      :load_game,
   r:      :toggle_recording,
   p:      :start_playback,
-  c:      :print_positions
+  c:      :print_positions,
+  h:      :toggle_scores
 }
 
 # Keys that make moves, ignored while the computer or a playback is playing.
 PLAYER_ACTIONS = {
   e: :auto_move,  # let the computer make one move
-  u: :undo
+  u: :undo,
+  d: :skip_tiles  # deal a new set of tiles
 }
 
 OPTION_KEYS = { one: 0, two: 1, three: 2 }
@@ -118,7 +144,9 @@ AUTO_RESTART  = 90   # ticks to show "Game over" before auto mode starts again
 MESSAGE_TICKS = 120  # how long messages like "Game saved" stay up
 BLINK_TICKS   = 15   # how fast the recording mark blinks
 
-SAVE_FILE = "data/1010game.txt"  # relative to the mygame folder
+SAVE_FILE   = "data/1010game.txt"  # relative to the mygame folder
+SCORES_FILE = "data/1010scores.txt"
+LOG_FILE    = "data/1010.log"
 
 # ---------------------------------------------------------------------------
 # Colors
@@ -135,8 +163,14 @@ COLORS = {
   invalid:         { r: 200, g: 60,  b: 60  },
   score:           { r: 220, g: 30,  b: 30  },  # the original used red text
   text:            { r: 50,  g: 50,  b: 60  },
-  dim_text:        { r: 120, g: 120, b: 130 }
+  dim_text:        { r: 120, g: 120, b: 130 },
+  warning:         { r: 205, g: 110, b: 0   },
+  heart:           { r: 225, g: 35,  b: 70  },
+  used_heart:      { r: 215, g: 215, b: 215 }
 }
+
+# The color of a message below the board, by its level (see show_message).
+MESSAGE_COLORS = { info: :text, warn: :warning, error: :invalid }
 
 # Colors by tile value, like GameWindow#cell_color.
 TILE_COLORS = {
@@ -170,7 +204,8 @@ class Game
   # `options` come from the command line (see options_from); tests pass their own.
   def setup(options = Game.options_from(GTK.cli_arguments))
     # Every game's seed comes from here, so --seed repeats a whole session.
-    state.seeds          = Random.new(options[:seed] || rand(2**31))
+    state.session_seed   = options[:seed] || rand(2**31)
+    state.seeds          = Random.new(state.session_seed)
     state.auto_player    = auto_player_for options[:strategy]
     state.auto           = options[:auto]  # computer plays (A)
     state.auto_runs      = 0               # games finished in auto mode
@@ -179,6 +214,15 @@ class Game
     state.last_recording = nil
     state.playback       = nil             # events still to replay
     state.opened_at      = Kernel.tick_count  # for the time played, over every game
+    state.show_scores    = false           # H: high scores instead of the help
+
+    # Tests pass their own files; a nil scores file keeps the scores in memory.
+    state.save_file      = options.fetch(:save_file, SAVE_FILE)
+    state.scores_file    = options.fetch(:scores_file, SCORES_FILE)
+
+    GameLog.info "Session seed #{state.session_seed} (start with --seed #{state.session_seed} to repeat it)"
+    options.fetch(:warnings, []).each { |warning| show_message warning, level: :warn }
+    load_scores
 
     # Like the original, carry on with a saved game if there is one.
     load_game quiet: true unless state.auto
@@ -186,19 +230,29 @@ class Game
   end
 
   # Reads `--auto [strategy] --seed N` from the command line.
-  # (DragonRuby gives a bare `--auto` the value nil.)
+  # (DragonRuby gives a bare `--auto` the value nil.) Problems are returned
+  # as `warnings:` for setup to show, since the game hasn't started yet.
   def self.options_from cli
     options = { auto: cli.key?(:auto), strategy: cli[:auto] || AutoPlayer::DEFAULT_STRATEGY }
-    options[:seed] = cli[:seed].to_i if cli[:seed]
+    return options unless cli.key?(:seed)
+
+    seed = cli[:seed].to_s
+    if Board.digits?(seed, Board::DIGITS)
+      options[:seed] = seed.to_i
+    else
+      options[:warnings] = ["--seed needs a whole number, not #{seed.inspect}: using a random seed"]
+    end
     options
   end
 
+  # Falls back to the default strategy (with a message) if `strategy` is unknown.
   def auto_player_for strategy
+    unless AutoPlayer::STRATEGIES.include?(strategy.to_sym)
+      GameLog.info "The strategies are: #{AutoPlayer::STRATEGIES.join(', ')}"
+      show_message "Unknown strategy #{strategy}, using #{AutoPlayer::DEFAULT_STRATEGY}", level: :warn
+      strategy = AutoPlayer::DEFAULT_STRATEGY
+    end
     AutoPlayer.new strategy, random: Random.new(next_seed)
-  rescue ArgumentError => e
-    puts e.message
-    show_message "#{e.message.split(',').first}, using #{AutoPlayer::DEFAULT_STRATEGY}"
-    AutoPlayer.new AutoPlayer::DEFAULT_STRATEGY, random: Random.new(next_seed)
   end
 
   def next_seed
@@ -219,21 +273,28 @@ class Game
     stop_recording
     state.board           = board
     state.seed            = seed   # nil for a loaded game, which can't be recorded
-    state.previous_board  = nil    # for undo (one level, like the original)
+    state.history         = []     # the boards before the last few moves, for undo
+    state.score_entry     = nil    # this game's place in the high scores, once it ends
     state.selected_option = nil    # index of the chosen tile in board.options
     state.dragging        = false  # is the chosen tile being dragged?
     state.animation       = nil    # the MoveAnimation of the last move
     state.playback        = nil    # a new game also ends a playback
-    state.ended_at        = nil
     state.next_auto_at    = Kernel.tick_count
-    refresh_game_over
+    # A loaded game may have ended already: that isn't a new result to record.
+    state.game_over       = board.game_over?
+    state.ended_at        = state.game_over ? Kernel.tick_count : nil
   end
 
   # Call after every change to the board. (Checking every frame would mean
   # trying every tile on every square 60 times a second.)
   def refresh_game_over
+    was_over        = state.game_over
     state.game_over = state.board.game_over?
     state.ended_at  = state.game_over ? (state.ended_at || Kernel.tick_count) : nil
+    return unless state.game_over && !was_over
+
+    GameLog.info "Game over with a score of #{state.board.score}"
+    record_score unless computer_playing?
   end
 
   # -------------------------------------------------------------------------
@@ -246,6 +307,23 @@ class Game
     handle_mouse
     update
     render
+  rescue => e
+    log_crash e
+    raise  # DragonRuby then shows the error and writes logs/exceptions/
+  end
+
+  # Logs what is needed to repeat a crash: the seeds, the mode and the board.
+  # DragonRuby retries the tick, so the same error is only logged once.
+  def log_crash error
+    return if @last_crash == error.message
+
+    @last_crash = error.message
+    board = state.board
+    GameLog.error "#{error.class}: #{error.message}"
+    GameLog.error "  at #{(error.backtrace || []).first(5).join("\n     ")}"
+    GameLog.error "  session seed #{state.session_seed}, game seed #{state.seed.inspect}, " \
+                  "auto #{state.auto.inspect}, playback #{!state.playback.nil?}"
+    GameLog.error "  board:\n#{board.to_save}" if board
   end
 
   def game_over?
@@ -254,6 +332,12 @@ class Game
 
   def selected_tile
     state.selected_option && state.board.options[state.selected_option]
+  end
+
+  # While the computer or a playback is playing, the player's moves would
+  # interfere, so the keys and mouse that make moves are ignored.
+  def computer_playing?
+    state.auto || state.playback
   end
 
   # Moves the computer or the playback along. (Kept out of the render
@@ -273,11 +357,8 @@ class Game
 
   # Drops the move animation and the message once their time is up.
   def expire_finished now
-    animation = state.animation
-    state.animation = nil if animation && animation.done?(now)
-
-    message = state.message
-    state.message = nil if message && now - message.at >= MESSAGE_TICKS
+    state.animation = nil if state.animation&.done?(now)
+    state.message   = nil if state.message && now - state.message.at >= MESSAGE_TICKS
   end
 
   # -------------------------------------------------------------------------
@@ -290,7 +371,7 @@ class Game
     keys = inputs.keyboard.key_down
 
     KEY_ACTIONS.each { |key, action| send action if keys.send(key) }
-    return if state.auto || state.playback  # the rest would interfere with the computer
+    return if computer_playing?
 
     PLAYER_ACTIONS.each { |key, action| send action if keys.send(key) }
     OPTION_KEYS.each { |key, index| select_option index if keys.send(key) }
@@ -302,7 +383,7 @@ class Game
   # Either way the tile is placed when the mouse button is RELEASED over the board.
   def handle_mouse
     mouse = inputs.mouse
-    return if state.auto || state.playback || game_over?
+    return if computer_playing? || game_over?
 
     if mouse.key_down.left
       index = option_under_mouse
@@ -329,7 +410,7 @@ class Game
   # C: prints the first position where each option fits (for debugging).
   def print_positions
     state.board.options.each_with_index do |tile, index|
-      puts "Option #{index + 1} #{tile.name} fits first at #{state.board.find_position(tile).inspect}"
+      GameLog.info "Option #{index + 1} #{tile.name} fits first at #{state.board.find_position(tile).inspect}"
     end
   end
 
@@ -345,7 +426,7 @@ class Game
     move   = state.board.play index, row, col
     return false unless move
 
-    state.previous_board  = before  # one level of undo, like the original
+    remember_for_undo before
     state.recording.events << [:move, index, row, col] if state.recording
     state.selected_option = nil
     clear_step = state.auto ? MoveAnimation::PLACE_STEP_TICKS : MoveAnimation::CLEAR_STEP_TICKS
@@ -354,15 +435,45 @@ class Game
     true
   end
 
-  def undo
-    return show_message("Nothing to undo") unless state.previous_board
+  # Keeps the board from before a move, as far back as there are undos left.
+  def remember_for_undo board
+    state.history << board
+    state.history.shift while state.history.length > Board::UNDOS
+  end
 
-    state.board           = state.previous_board
-    state.previous_board  = nil
-    state.selected_option = nil
+  # Goes back one move, Board::UNDOS times per game (shown as hearts).
+  # Returns false if it can't.
+  def undo
+    board = state.board
+    return refuse("No undos left in this game") if board.undos_left == 0
+    return refuse("Nothing to undo") if state.history.empty?
+
+    state.board            = state.history.pop
+    state.board.undos_left = board.undos_left - 1  # the older board had more
+    state.selected_option  = nil
     state.animation       = nil
     state.recording.events << [:undo] if state.recording
     refresh_game_over
+    true
+  end
+
+  # D: swaps the tiles on offer for a new set, Board::SKIPS times per game.
+  # Like a move, it can be undone.
+  def skip_tiles
+    before = state.board.copy
+    return refuse("No new tiles left in this game") unless state.board.skip_options
+
+    remember_for_undo before
+    state.recording.events << [:skip] if state.recording
+    state.selected_option = nil
+    refresh_game_over
+    true
+  end
+
+  # Shows why something can't be done, and returns false.
+  def refuse text
+    show_message text
+    false
   end
 
   # -------------------------------------------------------------------------
@@ -388,15 +499,22 @@ class Game
     state.auto_runs += 1
     if state.board.score > state.auto_best
       state.auto_best = state.board.score
-      puts "Score = #{state.auto_best}"
+      GameLog.info "Score = #{state.auto_best}, a new best after #{state.auto_runs} games"
     end
     new_game
   end
 
   # The strategy is in auto_player.rb (jc unless --auto names another).
+  # A move that doesn't fit is a bug in the strategy, so auto mode stops
+  # instead of trying it again and again.
   def auto_move
     move = state.auto_player.choose_move state.board
-    try_place(*move) if move
+    return if move.nil? && game_over?
+    return if move && try_place(*move)
+
+    state.auto = false
+    show_message "Bug: the #{state.auto_player.strategy} player chose #{move.inspect}, " \
+                 "which doesn't fit. Auto mode is off.", level: :error
   end
 
   # -------------------------------------------------------------------------
@@ -431,53 +549,123 @@ class Game
     state.playback = recording.events.dup
   end
 
+  # Stops with an error if an event can't be replayed, which means the
+  # recording doesn't match the game it is replayed on.
   def play_back_next
     event = state.playback.shift
-    case event && event[0]
-    when :move then try_place event[1], event[2], event[3]
-    when :undo then undo
-    else
+    kind, *move = event  # [:move, index, row, col], [:undo], [:skip] or nil at the end
+    replayed = case kind
+               when :move then try_place(*move)
+               when :undo then undo
+               when :skip then skip_tiles
+               when nil   then finish_playback
+               end
+    unless replayed
       state.playback = nil
-      show_message "Playback finished"
+      show_message "Playback stopped: #{event.inspect} doesn't work on this board", level: :error
     end
     state.next_auto_at = Kernel.tick_count + AUTO_DELAY
+  end
+
+  def finish_playback
+    state.playback = nil
+    show_message "Playback finished"
+    true
   end
 
   # -------------------------------------------------------------------------
   # Saving and quitting
   # -------------------------------------------------------------------------
 
+  # Returns false if the game couldn't be saved.
   def save_game
-    DR.write_file SAVE_FILE, state.board.to_save
-    show_message "Game saved"
+    DR.write_file state.save_file, state.board.to_save
+    show_message "Game saved (score #{state.board.score})"
+    true
+  rescue => e
+    show_error "Couldn't save the game to #{state.save_file}", e
+    false
   end
 
   def load_game quiet: false
-    text = DR.read_file SAVE_FILE  # nil if there is no save file
+    text = begin
+      DR.read_file state.save_file  # nil if there is no save file
+    rescue => e
+      return show_error("Couldn't read #{state.save_file}", e)
+    end
     if text.nil?
       show_message "No saved game" unless quiet
       return
     end
 
     board = Board.from_save text, random: Random.new(next_seed)
-    if board.nil?
-      show_message "The save file is damaged"
-      return
-    end
-
     board.deal_if_needed
     start board
-    show_message "Loaded the saved game (N starts a new one)"
+    show_message "Loaded the saved game, score #{board.score} (N starts a new one)"
+  rescue Board::DamagedSave => e
+    show_message "The save file is damaged: #{e.message}", level: :error
   end
 
-  def show_message text
-    state.message = { text: text, at: Kernel.tick_count }
+  # Shows `text` below the board for a while, and logs it. Warnings and
+  # errors are drawn in color (MESSAGE_COLORS).
+  def show_message(text, level: :info)
+    GameLog.write level, text
+    state.message = { text: text, level: level, at: Kernel.tick_count }
     nil
   end
 
+  # For something that failed: shows `text`, and logs the exception too.
+  def show_error text, exception
+    show_message "#{text} (see #{LOG_FILE})", level: :error
+    GameLog.error "#{exception.class}: #{exception.message.strip}"
+    nil
+  end
+
+  # Doesn't quit if the save failed, so the game isn't lost.
   def save_and_quit
-    save_game
-    DR.request_quit
+    DR.request_quit if save_game
+  end
+
+  # -------------------------------------------------------------------------
+  # High scores (see leaderboard.rb)
+  # -------------------------------------------------------------------------
+
+  # Lines of the scores file that can't be read are reported and left out.
+  def load_scores
+    text = state.scores_file && DR.read_file(state.scores_file)
+    state.leaderboard, problems = Leaderboard.from_text(text.to_s)
+    problems.each { |problem| GameLog.warn "#{state.scores_file}: #{problem}" }
+  rescue => e
+    state.leaderboard = Leaderboard.new
+    show_error "Couldn't read the high scores from #{state.scores_file}", e
+  end
+
+  # When a game you played ends. If you undo and it ends again, the better
+  # of the two scores is kept.
+  def record_score
+    leaderboard = state.leaderboard
+    best_before = leaderboard.best
+    score       = state.board.score
+    state.score_entry = leaderboard.add score, GameLog.timestamp.split(" ").first, replacing: state.score_entry
+    return unless state.score_entry
+
+    if score > best_before
+      show_message "New high score: #{score}!"
+    else
+      GameLog.info "Score #{score} is number #{leaderboard.rank(state.score_entry)} in the high scores"
+    end
+    save_scores
+  end
+
+  def save_scores
+    DR.write_file state.scores_file, state.leaderboard.to_text if state.scores_file
+  rescue => e
+    show_error "Couldn't save the high scores to #{state.scores_file}", e
+  end
+
+  # H: the panel shows the high scores instead of the help, and back.
+  def toggle_scores
+    state.show_scores = !state.show_scores
   end
 
   # Esc: deletes the saved game too, so the next start is a new game.
@@ -487,7 +675,12 @@ class Game
   end
 
   def delete_save
-    DR.delete_file SAVE_FILE if DR.stat_file(SAVE_FILE)
+    return unless DR.stat_file(state.save_file)
+
+    DR.delete_file state.save_file
+    GameLog.info "Deleted the saved game"
+  rescue => e
+    show_error "Couldn't delete #{state.save_file}", e
   end
 
   # Called by `shutdown` when the game exits (Esc, Q or closing the window),
@@ -495,8 +688,8 @@ class Game
   def print_summary
     return unless state.board
 
-    puts "Total time played = #{play_seconds} seconds"
-    puts "Score = #{state.board.score}"
+    GameLog.info "Total time played = #{play_seconds} seconds"
+    GameLog.info "Score = #{state.board.score}"
   end
 
   # -------------------------------------------------------------------------
@@ -544,11 +737,11 @@ class Game
   end
 
   def render_board
-    outputs.sprites << { x: BOARD_X - BOARD_FRAME,
-                         y: BOARD_TOP - BOARD_SIZE - BOARD_FRAME,
-                         w: BOARD_SIZE + 2 * BOARD_FRAME,
-                         h: BOARD_SIZE + 2 * BOARD_FRAME,
-                         path: :solid }.merge(COLORS[:board])
+    solid_rect({ x: BOARD_X - BOARD_FRAME,
+                 y: BOARD_TOP - BOARD_SIZE - BOARD_FRAME,
+                 w: BOARD_SIZE + 2 * BOARD_FRAME,
+                 h: BOARD_SIZE + 2 * BOARD_FRAME },
+               COLORS[:board])
 
     # While a move is animated, squares show what the animation says
     # (the tile appearing, then full lines emptying one by one).
@@ -572,11 +765,9 @@ class Game
     board = state.board
     row, col = cell_under_mouse
     if row
-      if board.fits?(tile, row, col)
-        board_squares board.cells_for(tile, row, col), TILE_COLORS[tile.value], alpha: ALPHA[:preview]
-      else
-        board_squares board.cells_for(tile, row, col), COLORS[:invalid], alpha: ALPHA[:blocked]
-      end
+      fits  = board.fits?(tile, row, col)
+      color = fits ? TILE_COLORS[tile.value] : COLORS[:invalid]
+      board_squares board.cells_for(tile, row, col), color, alpha: fits ? ALPHA[:preview] : ALPHA[:blocked]
     end
 
     if inputs.keyboard.o
@@ -593,7 +784,7 @@ class Game
       tile     = board.options[i]
       selected = state.selected_option == i
 
-      outputs.sprites << rect.merge(path: :solid).merge(selected ? COLORS[:option_selected] : COLORS[:option])
+      solid_rect rect, selected ? COLORS[:option_selected] : COLORS[:option]
       label rect.x + OPTION_NUMBER_INSET, rect.y + rect.h - OPTION_NUMBER_INSET, (i + 1).to_s,
             size: 18, color: :dim_text, anchor_x: 0.5
       next unless tile
@@ -633,28 +824,72 @@ class Game
 
   def render_panel
     label PANEL_CENTER_X, PANEL_Y[:title], "1010!", size: 64, color: :text, anchor_x: 0.5
-    label PANEL_X, PANEL_Y[:score], "Score: #{state.board.score}", size: 40, color: :score
-    label PANEL_X, PANEL_Y[:time], "Time: #{format_time play_seconds}", size: 24, color: :dim_text
+    panel_label :score, "Score: #{state.board.score}", size: 40, color: :score
+    panel_label :best, "Your best: #{state.leaderboard.best}", size: 22, color: :text
+    panel_label :time, "Time: #{format_time play_seconds}", size: 22, color: :dim_text
+    render_undo_hearts
+    panel_label :skips, "New tiles left (D): #{state.board.skips_left}", size: 18, color: :dim_text
 
     if game_over?
-      hint = state.auto ? "Starting another game..." : "N: new game   U: undo"
-      label PANEL_X, PANEL_Y[:status], "Game over!", size: 34, color: :score
-      label PANEL_X, PANEL_Y[:status_hint], hint, size: 20, color: :text
+      hint = state.auto ? "Starting another game..." : game_over_hint
+      panel_label :status, "Game over!", size: 30, color: :score
+      panel_label :status_hint, hint, size: 18, color: :text
     end
 
     if state.playback
-      label PANEL_X, PANEL_Y[:mode], "PLAYBACK", size: 22, color: :hint
+      panel_label :mode, "PLAYBACK", size: 22, color: :hint
     elsif state.auto
-      label PANEL_X, PANEL_Y[:mode], "AUTO: #{state.auto_player.strategy}", size: 22, color: :hint
-      label PANEL_X, PANEL_Y[:mode_detail], "runs #{state.auto_runs}, best #{state.auto_best}",
-            size: 22, color: :hint
+      panel_label :mode, "AUTO: #{state.auto_player.strategy}", size: 22, color: :hint
+      panel_label :mode_detail, "runs #{state.auto_runs}, best #{state.auto_best}", size: 22, color: :hint
     end
 
+    state.show_scores ? render_scores : render_help
+
+    message = state.message
+    label MESSAGE_X, MESSAGE_Y, message.text, size: 20, color: MESSAGE_COLORS[message.level] if message
+  end
+
+  # What can still be done when the game is over.
+  def game_over_hint
+    keys = ["N: new"]
+    keys << "U: undo"      if state.board.undos_left > 0 && !state.history.empty?
+    keys << "D: new tiles" if state.board.skips_left > 0
+    keys.join("  ")
+  end
+
+  # A heart per undo: red while it can still be used, gray once used.
+  def render_undo_hearts
+    y = PANEL_Y[:undos]
+    Board::UNDOS.times do |i|
+      color = i < state.board.undos_left ? COLORS[:heart] : COLORS[:used_heart]
+      pixel_icon HEART, PANEL_X + i * HEART_STEP, y, color
+    end
+    label PANEL_X + Board::UNDOS * HEART_STEP + 4, y, "undos (U)", size: 18, color: :dim_text
+  end
+
+  def render_help
     HELP_LINES.each_with_index do |text, i|
-      label PANEL_X, PANEL_Y[:help] - i * HELP_LINE_HEIGHT, text, size: 20, color: :dim_text
+      label PANEL_X, help_line_y(i), text, size: 18, color: :dim_text
     end
+  end
 
-    label MESSAGE_X, MESSAGE_Y, state.message.text, size: 20, color: :text if state.message
+  # Your best scores, with this game's (once it has ended) highlighted.
+  def render_scores
+    label PANEL_X, help_line_y(0), "High scores (H: help)", size: 20, color: :text
+    entries = state.leaderboard.entries
+    label PANEL_X, help_line_y(1), "None yet: finish a game!", size: 18, color: :dim_text if entries.empty?
+
+    entries.each_with_index do |entry, i|
+      y     = help_line_y(i + 1)
+      color = entry.equal?(state.score_entry) ? :score : :dim_text
+      label SCORE_COLUMNS[:rank],  y, "#{i + 1}.",       size: 18, color: color
+      label SCORE_COLUMNS[:score], y, entry.score.to_s, size: 18, color: color, anchor_x: 1
+      label SCORE_COLUMNS[:date],  y, entry.date,       size: 18, color: color
+    end
+  end
+
+  def help_line_y line
+    PANEL_Y[:help] - line * HELP_LINE_HEIGHT
   end
 
   # A blinking red square and "REC" next to the time while a game is being
@@ -664,8 +899,8 @@ class Game
 
     y = PANEL_Y[:time]
     if Kernel.tick_count.idiv(BLINK_TICKS).even?
-      outputs.sprites << { x: RECORDING_MARK_X, y: y - RECORDING_MARK / 2, w: RECORDING_MARK, h: RECORDING_MARK,
-                           path: :solid }.merge(COLORS[:score])
+      solid_rect({ x: RECORDING_MARK_X, y: y - RECORDING_MARK.idiv(2), w: RECORDING_MARK, h: RECORDING_MARK },
+                 COLORS[:score])
     end
     label RECORDING_MARK_X + RECORDING_MARK + 6, y, "REC", size: 24, color: :score
   end
@@ -682,11 +917,25 @@ class Game
   #    ########
   #    .######.
   def square x:, y:, size:, color:, alpha: ALPHA[:opaque], corner: CORNER
-    outputs.sprites << [
+    [
       { x: x + corner,        y: y,          w: size - 2 * corner, h: size },
       { x: x,                 y: y + corner, w: corner,            h: size - 2 * corner },
       { x: x + size - corner, y: y + corner, w: corner,            h: size - 2 * corner }
-    ].map { |rect| rect.merge(path: :solid, a: alpha).merge(color) }
+    ].each { |rect| solid_rect rect, color, alpha: alpha }
+  end
+
+  # A plain filled rectangle. `rect` is { x:, y:, w:, h: } and `color` a
+  # value of COLORS or TILE_COLORS.
+  def solid_rect(rect, color, alpha: ALPHA[:opaque])
+    outputs.sprites << rect.merge(path: :solid, a: alpha).merge(color)
+  end
+
+  # Draws `shape` (a Tile) pixel by pixel, its left edge at x and centered on y.
+  def pixel_icon shape, x, y, color, pixel: HEART_PIXEL
+    top = y + shape.height * pixel / 2
+    shape.cells.each do |r, c|
+      solid_rect({ x: x + c * pixel, y: top - (r + 1) * pixel, w: pixel, h: pixel }, color)
+    end
   end
 
   def board_square row, col, color, alpha: ALPHA[:opaque]
@@ -711,6 +960,11 @@ class Game
                         anchor_x: anchor_x, anchor_y: 0.5 }.merge(COLORS[color])
   end
 
+  # A label on one of the panel's rows (a key of PANEL_Y).
+  def panel_label(row, text, size:, color:)
+    label PANEL_X, PANEL_Y[row], text, size: size, color: color
+  end
+
   # Since the game opened, like the original: in auto mode that covers every
   # game played, not just the one in progress.
   def play_seconds
@@ -728,6 +982,7 @@ end
 
 def boot args
   args.state = {}
+  GameLog.open LOG_FILE unless GTK.cli_arguments.key?(:test)  # tests don't touch it
 end
 
 def tick args
