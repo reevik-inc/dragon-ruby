@@ -18,3 +18,7 @@ and docs), not the DragonRuby SDK, which you get from https://dragonruby.org.
    `./dragonruby mygame --test tests/<name>_tests.rb` to run the tests.
 
 Built and tested with DragonRuby 7.25 on macOS.
+
+## License
+
+MIT: see [LICENSE](LICENSE). The DragonRuby SDK has its own license and is not part of this repository.

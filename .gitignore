@@ -8,6 +8,7 @@
 /*
 !/.gitignore
 !/README.md
+!/LICENSE
 
 # Game folders: only mygame/, not the SDK binaries, docs, logs and tmp/
 !/*/
