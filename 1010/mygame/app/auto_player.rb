@@ -1,0 +1,103 @@
+# How the computer chooses its moves in auto mode, ported from auto_player.rb
+# of the Gosu version.
+#
+# Each strategy gets the board, the tile and every position where the tile
+# fits, and returns the position to use. Ties go to the position found first
+# (top-left first). Choose one when starting the game:
+#   ./dragonruby mygame --auto sam --seed 42
+class AutoPlayer
+  STRATEGIES       = [:first_fit, :last_fit, :random_fit, :shanko, :jc, :sam]
+  DEFAULT_STRATEGY = :jc
+
+  attr_reader :strategy
+
+  # `random` picks which tile to play. Keep it separate from the board's
+  # random numbers, so a recorded game deals the same tiles when played back.
+  def initialize strategy = DEFAULT_STRATEGY, random: Random.new
+    strategy = strategy.to_sym
+    unless STRATEGIES.include?(strategy)
+      raise ArgumentError, "unknown strategy #{strategy.inspect}, use one of: #{STRATEGIES.join(', ')}"
+    end
+
+    @strategy = strategy
+    @random   = random
+  end
+
+  # [option index, row, col] for the next move, or nil if no tile fits.
+  # Picks a random tile among those that fit somewhere, then the best spot
+  # for it. (The original picked any tile, and tried again next frame if it
+  # didn't fit.)
+  def choose_move board
+    fitting = (0...board.options.length).select { |index| board.fits_anywhere?(board.options[index]) }
+    return nil if fitting.empty?
+
+    index = pick fitting
+    row, col = best_position(board, board.options[index])
+    [index, row, col]
+  end
+
+  # The [row, col] this strategy would pick for the tile, or nil if it fits
+  # nowhere (Board1010#best_starting_position).
+  def best_position board, tile
+    positions = board.positions_for(tile)
+    return nil if positions.empty?
+
+    send @strategy, board, tile, positions
+  end
+
+  private
+
+  # NOTE: DragonRuby's Array#sample doesn't take `random:`.
+  def pick list
+    list[@random.rand(list.length)]
+  end
+
+  # The first position found.
+  def first_fit _board, _tile, positions
+    positions.first
+  end
+
+  # The last position found.
+  def last_fit _board, _tile, positions
+    positions.last
+  end
+
+  # Any position, at random.
+  def random_fit _board, _tile, positions
+    pick positions
+  end
+
+  # The position with the most neighbours occupied (in other words: the
+  # fewest neighbouring cells empty).
+  def shanko board, _tile, positions
+    positions.max_by { |row, col| board.filled_neighbours(row, col) }
+  end
+
+  # Suggested by JC: like shanko, but treat the edge cells as if their
+  # neighbours are always occupied. (The one the original had switched on.)
+  def jc board, _tile, positions
+    positions.max_by { |row, col| crowding(board, row, col) }
+  end
+
+  # Suggested by Sam: the position that completely fills the most rows and
+  # columns when the tile is placed. Falls back to jc's choice on a tie.
+  #
+  # NOTE: DragonRuby's max_by can't compare arrays ([lines, crowding]), so
+  # the two are folded into one number. Crowding is at most 8 + 2 = 10, so
+  # one more line always beats any amount of crowding.
+  def sam board, tile, positions
+    positions.max_by do |row, col|
+      board.lines_completed_by(tile, row, col) * 100 + crowding(board, row, col)
+    end
+  end
+
+  def crowding board, row, col
+    board.filled_neighbours(row, col) + board.edges_touched(row, col)
+  end
+
+  # Suggested by Andy (not implemented yet): "the position which results into
+  # minimum empty cells after placing the tile but before clearing the filled
+  # rows and columns". As worded, every position leaves the same number of
+  # empty cells (the tile always covers the same number of squares), so this
+  # idea needs a different measure before it can tell positions apart.
+end

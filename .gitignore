@@ -1,0 +1,31 @@
+# Only our own code and docs go in git, not the DragonRuby SDK.
+#
+# Each game folder (1010/, tic-tac-toe/, ...) is a full copy of the SDK
+# with the game in its mygame/ folder. So we ignore everything, then let
+# back in each game's app/, tests/, README.md and screenshot.
+
+# Everything at the top level: the SDK zip, dragonruby-macos/, .itch.toml, ...
+/*
+!/.gitignore
+!/README.md
+
+# Game folders: only mygame/, not the SDK binaries, docs, logs and tmp/
+!/*/
+/*/*
+!/*/mygame/
+
+# Inside mygame/: not the SDK template files (metadata/, fonts/, sounds/,
+# sprites/, open-source-licenses.txt) or the save files in data/
+/*/mygame/*
+!/*/mygame/app/
+!/*/mygame/tests/
+!/*/mygame/README.md
+!/*/mygame/screenshot.png
+
+# The SDK's scratch file, left as shipped
+/*/mygame/app/repl.rb
+
+# The unzipped SDK itself (it has a mygame/ folder too)
+/dragonruby-macos/
+
+.DS_Store
