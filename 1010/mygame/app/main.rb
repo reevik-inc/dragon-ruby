@@ -107,7 +107,7 @@ HELP_LINES = [
   "A: auto play  E: one move",
   "S: save     L: load",
   "R: record   P: play it back",
-  "C: print fits to console",
+  "C: debug prints to console",
   "Q: save and quit",
   "Esc: quit, delete the save"
 ]
