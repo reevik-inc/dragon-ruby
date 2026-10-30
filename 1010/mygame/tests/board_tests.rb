@@ -15,6 +15,18 @@ def fill_row board, row, except: []
   Board::COLS.times { |c| board.cells[row][c] = 1 unless except.include?(c) }
 end
 
+# Random numbers that always deal the same tile, so a test knows which
+# tile goes into the slot of the tile it plays.
+class SameTileDealer
+  def initialize name
+    @index = ALL_TILES.index(tile(name))
+  end
+
+  def rand _limit
+    @index
+  end
+end
+
 # A Game wired to the test's args, with a fresh board (not a saved game).
 # Its high scores stay in memory unless `options` names a scores_file.
 def new_test_game args, seed: 1, strategy: :jc, game_class: Game, **options
@@ -38,12 +50,14 @@ end
 
 # Holes on every third diagonal: every row and column has holes (so no line
 # is full, even after filling one), and no 3x3 space is left anywhere. So
-# placing the dot at (0, 0) ends the game: only sq3s are left.
+# placing the dot at (0, 0) ends the game: only sq3s are left (and another
+# sq3 is dealt into the dot's slot).
 def one_move_from_game_over board
   Board::ROWS.times do |r|
     Board::COLS.times { |c| board.cells[r][c] = (r + c) % 3 == 0 ? Board::EMPTY : 1 }
   end
   board.options.replace [tile(:dot), tile(:sq3), tile(:sq3)]
+  board.instance_variable_set :@random, SameTileDealer.new(:sq3)
 end
 
 # A Game whose Esc and R only note that they were called (the real Esc
@@ -125,12 +139,12 @@ end
 
 # --- A whole move (Board#play) ----------------------------------------------------
 
-def test_play_scores_and_uses_up_the_option args, assert
-  board = Board.new options: [tile(:sq2), tile(:dot)]
+def test_play_scores_and_deals_a_new_tile_into_the_slot args, assert
+  board = Board.new options: [tile(:sq2), tile(:dot), tile(:sq3)], random: SameTileDealer.new(:hl3)
   move  = board.play 0, 0, 0
 
   assert.equal! board.score, 4
-  assert.equal! board.options, [tile(:dot)]
+  assert.equal! board.options, [tile(:hl3), tile(:dot), tile(:sq3)]  # the others stay in their slots
   assert.equal! move.placed, [[0, 0, 2], [0, 1, 2], [1, 0, 2], [1, 1, 2]]
   assert.equal! move.cleared_rows, []
   assert.equal! move.cleared_cols, []
@@ -167,26 +181,34 @@ def test_row_and_column_cleared_together args, assert
   assert.equal! board.cells.flatten.uniq, [Board::EMPTY]
 end
 
-def test_play_deals_three_new_tiles_once_all_are_used args, assert
-  board = Board.new options: [tile(:dot)]
-  fill_row board, 0, except: [9]
+def test_there_are_always_three_tiles_to_choose_from args, assert
+  board = Board.new random: Random.new(7)
+  board.deal_if_needed
+  player = AutoPlayer.new :first_fit, random: Random.new(7)
 
-  move = board.play 0, 0, 9
-  assert.equal! move.cleared_rows, [0]      # the dot completed row 0
-  assert.equal! board.score, 1
-  assert.equal! board.options.length, 3     # the last option was used, so 3 new ones
+  20.times do
+    move = player.choose_move(board)
+    break unless move
+
+    board.play(*move)
+    assert.equal! board.options.length, Board::OPTIONS
+  end
+  assert.true! board.score > 0
 end
 
 # --- Options and game over ------------------------------------------------------
 
-def test_deals_three_tiles_only_when_empty args, assert
+def test_deal_if_needed_fills_the_empty_slots args, assert
   board = Board.new
   board.deal_if_needed
   assert.equal! board.options.length, 3
 
+  # A game saved before tiles were dealt one at a time can have fewer.
   board.options.delete_at 0
+  kept = board.options.dup
   board.deal_if_needed
-  assert.equal! board.options.length, 2
+  assert.equal! board.options.length, 3
+  assert.equal! board.options.first(2), kept
 end
 
 def test_the_same_seed_deals_the_same_tiles args, assert
@@ -418,13 +440,13 @@ def test_copy_is_independent args, assert
 end
 
 def test_save_and_load_round_trip args, assert
-  board = Board.new options: [tile(:hl5), tile(:dot)]
+  board = Board.new options: [tile(:hl5), tile(:dot), tile(:sq2)], random: SameTileDealer.new(:vl2)
   board.play 1, 2, 3
 
   copy = Board.from_save board.to_save
   assert.equal! copy.score, board.score
   assert.equal! copy.cells, board.cells
-  assert.equal! copy.options.map(&:name), [:hl5]
+  assert.equal! copy.options.map(&:name), [:hl5, :vl2, :sq2]
 end
 
 # Why Board.from_save rejects `text`, or nil if it doesn't.

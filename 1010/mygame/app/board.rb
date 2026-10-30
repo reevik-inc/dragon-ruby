@@ -55,19 +55,19 @@ class Board
   # -------------------------------------------------------------------------
 
   # One whole move: place option `index` with its anchor on (row, col),
-  # remove it from the options, clear full lines and deal new tiles if all 3
-  # are used up. Returns a Move (so the game can animate it), or nil if the
-  # tile doesn't fit there.
+  # clear full lines and deal a new tile into its slot, so there are always
+  # 3 tiles to choose from. (The original dealt 3 new ones once all 3 were
+  # used.) Returns a Move (so the game can animate it), or nil if the tile
+  # doesn't fit there.
   def play index, row, col
     tile = @options[index]
     return nil unless tile && fits?(tile, row, col)
 
     place tile, row, col
-    @options.delete_at index
     cells_before_clearing = @cells.map(&:dup)
     rows, cols = full_lines
     clear_lines rows, cols
-    deal_if_needed
+    @options[index] = random_tile
 
     Move.new(placed: cells_for(tile, row, col).map { |r, c| [r, c, tile.value] },
              cells_before_clearing: cells_before_clearing,
@@ -137,9 +137,12 @@ class Board
   # The tiles on offer
   # -------------------------------------------------------------------------
 
-  # Deals 3 new tiles once all of the current ones have been placed.
+  # Deals 3 new tiles to start a game. A game saved before tiles were dealt
+  # one at a time (see play) can have fewer: this fills its empty slots.
   def deal_if_needed
-    @options = generate_options if @options.empty?
+    return @options = generate_options if @options.empty?
+
+    @options << random_tile while @options.length < OPTIONS
   end
 
   # Swaps the tiles on offer for a new set, SKIPS times per game. Returns
@@ -153,12 +156,10 @@ class Board
   end
 
   # Board1010#generate_tiles: 3 random tiles. If none of them fit anywhere,
-  # the first one is swapped for a small tile that does fit.
-  #
-  # NOTE: DragonRuby's Array#sample doesn't take `random:`, so we pick an
-  # index with our own random numbers instead.
+  # the first one is swapped for a small tile that does fit. (The tile dealt
+  # after each move is just random: when nothing fits, the game is over.)
   def generate_options
-    tiles = Array.new(OPTIONS) { ALL_TILES[@random.rand(ALL_TILES.length)] }
+    tiles = Array.new(OPTIONS) { random_tile }
 
     unless tiles.any? { |tile| fits_anywhere?(tile) }
       small = SMALL_TILES.find { |tile| fits_anywhere?(tile) }
@@ -166,6 +167,12 @@ class Board
     end
 
     tiles
+  end
+
+  # NOTE: DragonRuby's Array#sample doesn't take `random:`, so we pick an
+  # index with our own random numbers instead.
+  def random_tile
+    ALL_TILES[@random.rand(ALL_TILES.length)]
   end
 
   # The first [row, col] where the tile fits, or nil.

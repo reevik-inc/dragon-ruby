@@ -19,8 +19,9 @@ From the `1010` folder:
 ```
 
 Drag one of the 3 tiles on the right onto the board, or pick one (click it, or press
-1/2/3) and then click a square. Full rows and columns are cleared, each square
-placed scores 1 point, and the game ends when none of the tiles on offer fit.
+1/2/3) and then click a square. A new tile takes the place of each one you place,
+so there are always 3 to choose from. Full rows and columns are cleared, each
+square placed scores 1 point, and the game ends when none of the tiles on offer fit.
 
 Each game you get 3 undos (the hearts under the score) and 3 new sets of tiles
 (D swaps the tiles on offer for another 3). An undo also takes back a new set.
@@ -108,6 +109,8 @@ Problems are reported instead of being ignored or crashing the game:
 * Messages show below the board, and recording shows a blinking square and
   "REC" instead of a triangle.
 * L loads the saved game while playing.
+* A new tile is dealt as soon as you place one, so there are always 3 to choose
+  from. The original dealt 3 new tiles only once all 3 were placed.
 * 3 undos per game instead of one at a time, new sets of tiles (D), and high
   scores (H).
 * A damaged save file is reported (see above) instead of crashing the game.
